@@ -357,6 +357,7 @@ If `AUTO_TASK_WEBHOOK_URL` is set, MouseSearch sends webhook notifications for:
 * `auto_update_ip`
 * `auto_organize_on_download`
 * `auto_organize_on_schedule`
+* `watch_grabbed`
 
 Set `AUTO_TASK_WEBHOOK_EVENTS` if you only want a subset of those events.
 
@@ -546,6 +547,24 @@ You may use different filesystems or Docker volumes, but be aware that this will
 If your torrent client reports a different path than MouseSearch can access locally, also set `REMOTE_TORRENT_DOWNLOAD_PATH`. Example: `REMOTE_TORRENT_DOWNLOAD_PATH=/data/torrents` and `LOCAL_TORRENT_DOWNLOAD_PATH=/downloads/torrents`.
 
 This setup guarantees that both paths point to the same underlying device, allowing hard links to be created.
+
+---
+
+## [BETA] Watches
+
+Watches are saved MAM searches (an author, a series, a keyword) that MouseSearch checks on a schedule, sending new matches to your torrent client. Turn them on in **Settings → Watches**, reload the page, then use the **Watches** button under the search box.
+
+Watches are built to protect your account first:
+
+- **A new watch never grabs the back-catalog.** Its first run only records what already exists; only releases uploaded after that are grabbed. Changing a watch's search re-baselines it. Tick *Also grab matches that already exist* to opt out.
+- **Each watch has a cost policy.** It can take only freeleech torrents (the default), freeleech or a wedge, or freeleech, a wedge or ratio.
+- **Limits apply across all watches:** a number of unsatisfied-torrent slots that are always kept free, a maximum number of grabs per 24 hours, and a ratio floor for grabs that cost ratio. These are checked against live MAM stats before each run. If the stats can't be read, nothing is grabbed.
+- **Wedges are opt-in.** Watches spend Freeleech wedges only when *Allow watches to spend Freeleech wedges* is on, and always keep the reserve you set. Wedges are never bought, and watches never spend bonus points. Your global *Auto-Use Freeleech Wedge on Download* setting does not apply to watch grabs.
+- **Nothing is grabbed twice.** Torrents you've already snatched on MAM, already have in your client, or that another watch grabbed are skipped.
+- **Retries happen automatically.** Matches that can't be grabbed yet (per-run cap, limits, not free) are retried on later runs. If MAM refuses a request (auth, blocked, rate limited), the whole run stops.
+- **Preview** shows what a run would do without grabbing anything, and **History** lists each watch's grabs and errors. Grabs send the `watch_grabbed` webhook event.
+
+Watch data is stored in `DATA_PATH/watches.db`. The settings can also be set as environment variables: `WATCHES_ENABLED`, `WATCHES_ALLOW_WEDGES`, `WATCHES_WEDGE_RESERVE` (default `5`), `WATCHES_UNSAT_RESERVE` (default `10`), `WATCHES_MIN_RATIO` (default `2.0`), `WATCHES_DAILY_GRAB_LIMIT` (default `10`).
 
 ---
 
