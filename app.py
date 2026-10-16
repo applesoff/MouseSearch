@@ -1100,6 +1100,7 @@ FALLBACK_CONFIG = {
     "RESULTS_SORT_MODE": DEFAULT_RESULTS_SORT_MODE,
     "SEARCH_FILTER_DEFAULTS": copy.deepcopy(DEFAULT_SEARCH_FILTER_DEFAULTS),
     "KINDLE_ENABLED": False,
+    "KINDLE_AUTO_SEND": False,
     "KINDLE_EMAIL": "",
     "KINDLE_FROM_EMAIL": "",
     "KINDLE_SMTP_HOST": "",
@@ -1781,6 +1782,7 @@ def load_config():
         "WATCHES_ENABLED",
         "WATCHES_ALLOW_WEDGES",
         "KINDLE_ENABLED",
+        "KINDLE_AUTO_SEND",
     ]:
         config[key] = coerce_bool(config.get(key), FALLBACK_CONFIG[key])
         val = config[key]
@@ -2284,7 +2286,8 @@ async def monitor_downloads_loop():
                                 
                                 # Add to monitoring state
                                 monitoring_state[torrent_hash] = {
-                                    "added_at": pending_data["added_at"]
+                                    "added_at": pending_data["added_at"],
+                                    "book": kindle_book_info(pending_data["metadata"]),
                                 }
                                 
                                 mids_to_remove.append(mid)
@@ -2480,6 +2483,8 @@ async def monitor_downloads_loop():
                             error=str(e),
                             **_get_torrent_metadata_summary(h),
                         )
+                if kindle_auto_send_enabled():
+                    schedule_kindle_auto_send(h, monitoring_state.get(h, {}).get("book"))
                 if h in monitoring_state:
                     del monitoring_state[h]
                 
@@ -4333,7 +4338,8 @@ async def add_torrent_to_client(
                     app.logger.info(f"Saved metadata for torrent hash: {resolved_hash}")
 
                 monitoring_state[normalize_info_hash(resolved_hash)] = {
-                    "added_at": time.time()
+                    "added_at": time.time(),
+                    "book": kindle_book_info(metadata_payload),
                 }
                 start_monitoring_loop()
 
@@ -4401,7 +4407,8 @@ async def add_torrent_to_client(
         # Start progress monitoring regardless of auto-organize setting.
         if resolved_hash:
             monitoring_state[normalize_info_hash(resolved_hash)] = {
-                "added_at": time.time()
+                "added_at": time.time(),
+                "book": kindle_book_info({"author": author, "title": title, "main_cat": incoming_data.get('main_cat', '')}),
             }
             start_monitoring_loop()
             app.logger.info(f"Registered {resolved_hash} for active monitoring.")
@@ -6007,6 +6014,7 @@ async def update_settings():
         "WATCHES_ENABLED",
         "WATCHES_ALLOW_WEDGES",
         "KINDLE_ENABLED",
+        "KINDLE_AUTO_SEND",
     }
     for key in FALLBACK_CONFIG.keys():
         if key in boolean_fields: config_to_update[key] = key in form
@@ -6469,6 +6477,7 @@ async def send_torrent_to_kindle(
     hash_val: str,
     *,
     book_info: dict | None = None,
+    wait_for_stable_source: bool = False,
 ) -> tuple[bool, str]:
     """
     Email the best Kindle-compatible file from a finished torrent to the configured Kindle address.
@@ -6503,6 +6512,8 @@ async def send_torrent_to_kindle(
     content_path = resolve_local_content_path(app.config, info)
     if content_path is None:
         return False, f"Unable to resolve download path for torrent {hash_val}."
+    if wait_for_stable_source:
+        await wait_for_stable_source_tree(content_path, poll_interval_seconds=2, max_wait_seconds=30)
     if not content_path.exists():
         return False, f"Download path not found: {content_path}"
 
@@ -6523,6 +6534,51 @@ async def send_torrent_to_kindle(
 
     app.logger.info(f"[KINDLE] {message}")
     return True, message
+
+
+KINDLE_EBOOK_MAIN_CAT = "14"
+_kindle_auto_send_tasks: set[asyncio.Task] = set()
+
+
+def kindle_auto_send_enabled() -> bool:
+    return bool(app.config.get("KINDLE_ENABLED") and app.config.get("KINDLE_AUTO_SEND"))
+
+
+def schedule_kindle_auto_send(hash_val: str, book_info: dict | None) -> None:
+    """Send in the background so SMTP never holds up the download monitor."""
+    task = asyncio.create_task(auto_send_to_kindle(hash_val, book_info))
+    _kindle_auto_send_tasks.add(task)
+    task.add_done_callback(_kindle_auto_send_tasks.discard)
+
+
+async def auto_send_to_kindle(hash_val: str, book_info: dict | None = None) -> bool:
+    """Email a finished e-book download to Kindle once. Audiobooks and other media are skipped."""
+    hash_val = normalize_info_hash(hash_val)
+    torrent_meta = load_database().get(hash_val) or {}
+    book_info = book_info or kindle_book_info(torrent_meta)
+    if str(book_info.get("main_cat") or "").strip() != KINDLE_EBOOK_MAIN_CAT:
+        return False
+    if torrent_meta.get("kindle_sent_at"):
+        app.logger.info(f"[KINDLE] Auto-send skipped for {hash_val}: already sent.")
+        return False
+
+    label = book_info.get("title") or hash_val
+    try:
+        success, message = await send_torrent_to_kindle(hash_val, book_info=book_info, wait_for_stable_source=True)
+    except Exception as e:
+        app.logger.error(f"[KINDLE] Exception during auto-send for {hash_val}: {e}", exc_info=True)
+        success, message = False, str(e)
+
+    if success:
+        # Remember the send so a restart re-checking this download cannot email it twice.
+        metadata = load_database()
+        if hash_val in metadata:
+            metadata[hash_val]["kindle_sent_at"] = datetime.now().isoformat()
+            save_database(metadata)
+        await broadcast_toast(f"Sent '{label}' to Kindle.", "success")
+    else:
+        await broadcast_toast(f"Auto Send to Kindle failed for '{label}': {message}", "warning")
+    return success
 
 
 @app.route('/kindle/send', methods=['POST'])
