@@ -44,6 +44,8 @@ from clients import get_torrent_client, get_client_display_name, get_available_c
 from hashing import calculate_torrent_hash_from_url, calculate_torrent_hash_from_bytes
 from hardcover.client import HardcoverAPIError, HardcoverClient
 from hardcover.resolver import HardcoverBatchRunner, HardcoverEnrichmentConfig, HardcoverResolver
+from watches import runner as watch_runner, store as watch_store
+from watches.routes import watches_bp
 
 # --- SCHEDULER AND STATE SETUP ---
 app = Quart(__name__)
@@ -794,7 +796,9 @@ async def startup():
         )
         scheduler.add_job(auto_buy_vip, 'date', run_date=datetime.now() + timedelta(seconds=10), id='initial_vip_buy_job')
         app.logger.info("AUTO_BUY_VIP started")
-    
+
+    sync_watches_scheduler_job()
+
     if not scheduler.running:
         scheduler.start()
         app.logger.debug("AsyncIOScheduler started")
@@ -822,6 +826,7 @@ async def shutdown():
     if scheduler.running:
         scheduler.shutdown()
         app.logger.info("AsyncIOScheduler shutdown")
+    watch_store.close()
 
     global HARDCOVER_CLIENT
     if HARDCOVER_CLIENT is not None:
@@ -1064,6 +1069,12 @@ FALLBACK_CONFIG = {
     "THUMBNAIL_CACHE_MAX_SIZE_MB": 500,
     "MAX_SEARCH_RESULTS": 50,
     "MAX_AUTOCOMPLETE_RESULTS": 20,
+    "WATCHES_ENABLED": False,
+    "WATCHES_ALLOW_WEDGES": False,
+    "WATCHES_WEDGE_RESERVE": 5,
+    "WATCHES_UNSAT_RESERVE": 10,
+    "WATCHES_MIN_RATIO": 2.0,
+    "WATCHES_DAILY_GRAB_LIMIT": 10,
     "HARDCOVER_ENRICHMENT_ENABLED": True,
     "HARDCOVER_API_TOKEN": "",
     "HARDCOVER_API_URL": "https://api.hardcover.app/v1/graphql",
@@ -1094,6 +1105,8 @@ VALID_VIP_DURATIONS = {"4", "8", "12", "max"}
 CONFIG_FILE = DATA_PATH / "config.json"
 DATABASE_FILE = DATA_PATH / "database.json"
 IP_STATE_FILE = DATA_PATH / "ip_state.json"
+watch_store.configure(DATA_PATH / "watches.db")
+app.register_blueprint(watches_bp)
 ENV_FILE = Path(".env")
 
 
@@ -1646,6 +1659,9 @@ def load_config():
         "HARDCOVER_RATE_LIMIT",
         "HARDCOVER_CONCURRENCY",
         "HARDCOVER_SEARCH_PER_PAGE",
+        "WATCHES_WEDGE_RESERVE",
+        "WATCHES_UNSAT_RESERVE",
+        "WATCHES_DAILY_GRAB_LIMIT",
     ]:
         try:
             config[key] = int(config[key])
@@ -1680,6 +1696,9 @@ def load_config():
         config["HARDCOVER_CONCURRENCY"] = FALLBACK_CONFIG["HARDCOVER_CONCURRENCY"]
     if config["HARDCOVER_SEARCH_PER_PAGE"] <= 0:
         config["HARDCOVER_SEARCH_PER_PAGE"] = FALLBACK_CONFIG["HARDCOVER_SEARCH_PER_PAGE"]
+    for key in ("WATCHES_WEDGE_RESERVE", "WATCHES_UNSAT_RESERVE", "WATCHES_DAILY_GRAB_LIMIT"):
+        if config[key] < 0:
+            config[key] = FALLBACK_CONFIG[key]
 
     # Floats
     for key in [
@@ -1690,7 +1709,8 @@ def load_config():
         "AUTO_BUY_UPLOAD_BONUS_THRESHOLD",
         "AUTO_BUY_UPLOAD_BONUS_AMOUNT",
         "AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB",
-        "HARDCOVER_MATCH_THRESHOLD"
+        "HARDCOVER_MATCH_THRESHOLD",
+        "WATCHES_MIN_RATIO",
     ]:
         try:
             config[key] = float(config[key])
@@ -1702,6 +1722,8 @@ def load_config():
         or config["AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB"] < 0
     ):
         config["AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB"] = FALLBACK_CONFIG["AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB"]
+    if not math.isfinite(config["WATCHES_MIN_RATIO"]) or config["WATCHES_MIN_RATIO"] < 1:
+        config["WATCHES_MIN_RATIO"] = FALLBACK_CONFIG["WATCHES_MIN_RATIO"]
 
     for key in [
         "AUTO_BUY_UPLOAD_RATIO_AMOUNT",
@@ -1734,6 +1756,8 @@ def load_config():
         "RTORRENT_DIGEST_AUTH",
         "HARDCOVER_ENRICHMENT_ENABLED",
         "QBITTORRENT_VERIFY_WEBUI_CERTIFICATE",
+        "WATCHES_ENABLED",
+        "WATCHES_ALLOW_WEDGES",
     ]:
         config[key] = coerce_bool(config.get(key), FALLBACK_CONFIG[key])
         val = config[key]
@@ -4106,28 +4130,26 @@ async def client_categories():
         categories = await torrent_client.get_categories()
     return jsonify(categories) if categories else (jsonify({'error': 'Failed'}), 500)
 
-@app.route('/client/add', methods=['POST'])
-async def client_add_torrent():
+async def add_torrent_to_client(
+    incoming_data: dict,
+    *,
+    allow_auto_personal_freeleech: bool = True,
+) -> tuple[dict, int]:
     """
-    Handles the addition of a new torrent to the torrent client, with support for buffer checks, custom download paths, and auto-organization.
-    Workflow:
-    - Ensures the torrent client is initialized and logs in.
-    - Parses incoming JSON data for torrent details, including optional custom_relative_path.
-    - Checks if the user's buffer is sufficient to download the torrent; if not, returns a response with recommended upload credit.
-    - If a MID (metadata ID) is present and auto-organization is enabled, adds the torrent immediately and stores metadata for later hash resolution.
-    - If no MID or auto-organization is disabled, calculates the torrent hash and stores metadata for auto-organization.
-    - Adds the torrent to the client and, if successful, starts monitoring for completion if auto-organization is enabled.
-    Args:
-        None (expects JSON data in the request body with keys such as 'torrent_url', 'author', 'title', 'id', 'category', 'size', 'series_info', 'main_cat', 'download_link', and optionally 'custom_relative_path').
-    Returns:
-        Flask Response: JSON response indicating success, error, or insufficient buffer, with appropriate HTTP status codes.
+    Add a torrent to the configured client and return ``(payload, http_status)``.
+
+    Shared by the ``/client/add`` route and the Watches runner. Handles the
+    buffer check, freeleech flags, fetching the ``.torrent`` bytes, storing
+    organize metadata and starting completion monitoring.
+
+    ``allow_auto_personal_freeleech=False`` ignores AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD
+    so callers (Watches) decide on wedge use themselves via ``use_personal_freeleech``.
     """
 
     if not torrent_client:
-        return jsonify({'error': 'Client not initialized'}), 500
-    
+        return {'error': 'Client not initialized'}, 500
+
     await torrent_client.login()
-    incoming_data = await request.get_json()
     
     # --- NEW: Extract custom path ---
     custom_relative_path = incoming_data.get('custom_relative_path')
@@ -4167,7 +4189,7 @@ async def client_add_torrent():
     elif use_personal_freeleech_requested:
         should_use_personal_freeleech = True
         app.logger.info(f"[DOWNLOAD] Personal Freeleech will be requested via download URL for torrent {id}")
-    elif app.config.get("AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD", False):
+    elif allow_auto_personal_freeleech and app.config.get("AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD", False):
         torrent_id_for_fl = None
         try:
             if id not in (None, '', '0', 0):
@@ -4220,7 +4242,7 @@ async def client_add_torrent():
                     math.ceil(needed_gb)
                 )
                 
-                return jsonify({
+                return {
                     'status': 'insufficient_buffer',
                     'buffer_gb': round(buffer_gb, 2),
                     'torrent_size_gb': round(torrent_size_gb, 2),
@@ -4229,7 +4251,7 @@ async def client_add_torrent():
                     'recommended_cost': int(recommended_amount * cost_per_gb),
                     'seedbonus': stats['seedbonus'],
                     'message': f'Insufficient buffer: {round(buffer_gb, 2)} GB available, {round(torrent_size_gb, 2)} GB needed'
-                }), 400
+                }, 400
     
     auto_organize_warning = None
     hash_val = None
@@ -4240,7 +4262,7 @@ async def client_add_torrent():
     if client_type in supports_binary_add and torrent_url and torrent_url.lower().startswith(("http://", "https://")):
         torrent_file_data, torrent_filename = await fetch_torrent_file_from_mam(torrent_url)
         if torrent_file_data is None:
-            return jsonify({'error': f'Failed to download torrent file from MAM before sending to {client_type}'}), 400
+            return {'error': f'Failed to download torrent file from MAM before sending to {client_type}'}, 400
         client_add_kwargs = {
             "torrent_data": torrent_file_data,
             "torrent_filename": torrent_filename
@@ -4298,7 +4320,7 @@ async def client_add_torrent():
                 }
                 if auto_organize_warning:
                     response_data['warning'] = auto_organize_warning
-                return jsonify(response_data)
+                return response_data, 200
             
             # Store in pending_mid_resolutions for later hash resolution
             pending_mid_resolutions[id] = {
@@ -4308,12 +4330,12 @@ async def client_add_torrent():
             app.logger.info(f"Added MID {id} to pending_mid_resolutions for hash resolution")
             start_monitoring_loop()
             
-            return jsonify({
+            return {
                 'message': result['message'],
                 'personal_freeleech_applied': should_use_personal_freeleech,
-            })
+            }, 200
         else:
-            return jsonify({'error': result.get('message', 'Unknown error')}), 400
+            return {'error': result.get('message', 'Unknown error')}, 400
     
     # Fallback: No MID or auto-organize disabled - use old hash-based approach
     if not hash_val:
@@ -4367,9 +4389,24 @@ async def client_add_torrent():
         if resolved_hash:
             response_data['hash'] = resolved_hash
         if auto_organize_warning: response_data['warning'] = auto_organize_warning
-        return jsonify(response_data)
+        return response_data, 200
     else:
-        return jsonify({'error': result.get('message', 'Unknown error')}), 400
+        return {'error': result.get('message', 'Unknown error')}, 400
+
+
+@app.route('/client/add', methods=['POST'])
+async def client_add_torrent():
+    """
+    Handles the addition of a new torrent to the torrent client, with support for buffer checks, custom download paths, and auto-organization.
+    Thin wrapper around ``add_torrent_to_client``; see it for the workflow.
+    Args:
+        None (expects JSON data in the request body with keys such as 'torrent_url', 'author', 'title', 'id', 'category', 'size', 'series_info', 'main_cat', 'download_link', and optionally 'custom_relative_path').
+    Returns:
+        Flask Response: JSON response indicating success, error, or insufficient buffer, with appropriate HTTP status codes.
+    """
+    incoming_data = await request.get_json()
+    payload, status_code = await add_torrent_to_client(incoming_data or {})
+    return jsonify(payload), status_code
 
 @app.route('/client/resolve_mid', methods=['POST'])
 async def client_resolve_mid():
@@ -5943,6 +5980,8 @@ async def update_settings():
         "BLOCK_DOWNLOAD_ON_LOW_BUFFER",
         "AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD",
         "AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_ENABLED",
+        "WATCHES_ENABLED",
+        "WATCHES_ALLOW_WEDGES",
     }
     for key in FALLBACK_CONFIG.keys():
         if key in boolean_fields: config_to_update[key] = key in form
@@ -6086,6 +6125,8 @@ async def update_settings():
             app.logger.info("Auto-organize safety net disabled.")
         except:
             pass
+
+    sync_watches_scheduler_job()
 
     # Get the new display name from the source of truth
     new_type = config_to_update.get("TORRENT_CLIENT_TYPE")
@@ -6493,6 +6534,146 @@ async def check_for_unorganized_torrents():
                 error=last_error,
             )
 
+
+# --- WATCHES (beta) ---
+# The runner lives in watches/; these adapters hand it the app's MAM, account
+# and client plumbing without the runner importing app.py.
+WATCHES_TICK_MINUTES = 5
+
+
+def sync_watches_scheduler_job():
+    """Register or remove the watches tick so it matches WATCHES_ENABLED."""
+    if app.config.get("WATCHES_ENABLED"):
+        scheduler.add_job(
+            watch_runner.run_all_watches,
+            'interval',
+            minutes=WATCHES_TICK_MINUTES,
+            id='watches_tick_job',
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=WATCHES_TICK_MINUTES * 60,
+        )
+        app.logger.info(f"[WATCH] Watches (beta) enabled; checking every {WATCHES_TICK_MINUTES} min.")
+    else:
+        try:
+            scheduler.remove_job('watches_tick_job')
+        except Exception:
+            pass
+
+
+async def watch_mam_search(params: dict) -> list[dict]:
+    if not await login_mam():
+        raise RuntimeError("MAM login failed (check the mam_id cookie in Settings)")
+    headers = {"Cookie": "; ".join([f"{k}={v}" for k, v in mam_session_cookies.items()])}
+    response = await request_mam(
+        "GET",
+        f"{app.config['MAM_API_URL']}/tor/js/loadSearchJSONbasic.php",
+        params=params,
+        headers=headers,
+        timeout=Timeout(connect=5.0, read=60.0, write=15.0, pool=None),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if isinstance(payload, dict) and payload.get("error") and not payload.get("data"):
+        # MAM answers "Nothing returned, out of 0" as an error for empty searches.
+        if "nothing returned" in str(payload["error"]).lower():
+            return []
+        raise RuntimeError(str(payload["error"]))
+    base_dl_url = f"{app.config['MAM_API_URL']}/tor/download.php/"
+    items = []
+    for item in (payload or {}).get("data", []) or []:
+        item["title"] = html.unescape(str(item.get("title") or ""))
+        item["download_link"] = build_mam_download_link(base_dl_url, item.get("dl"), item.get("id"))
+        item["author_info"] = parse_mam_metadata(item.get("author_info", ""))
+        item["size_gb"] = parse_size_to_gb(item.get("size"), default=0.0)
+        items.append(item)
+    return items
+
+
+async def watch_account_snapshot() -> dict | None:
+    """Live MAM stats the watch guards need, or None if they cannot be read."""
+    if not await login_mam():
+        return None
+    response = await request_mam(
+        "GET",
+        f"{app.config['MAM_API_URL']}/jsonLoad.php",
+        params={"snatch_summary": "true"},
+        cookies=mam_session_cookies,
+        timeout=10,
+    )
+    response.raise_for_status()
+    data = response.json() or {}
+    unsat = (data.get("snatch_summary") or {}).get("unsat") or {}
+    if "count" not in unsat or "limit" not in unsat:
+        return None
+    vip_active = False
+    try:
+        vip_until = data.get("vip_until")
+        if vip_until:
+            vip_active = datetime.fromisoformat(str(vip_until).strip().replace(' ', 'T')) > datetime.utcnow()
+    except Exception:
+        vip_active = False
+    gib = 1024 ** 3
+    uploaded_gb = float(data["uploaded_bytes"]) / gib if data.get("uploaded_bytes") is not None else parse_size_to_gb(data.get("uploaded"))
+    downloaded_gb = float(data["downloaded_bytes"]) / gib if data.get("downloaded_bytes") is not None else parse_size_to_gb(data.get("downloaded"))
+    return {
+        "unsat_count": unsat["count"],
+        "unsat_limit": unsat["limit"],
+        "wedges": data.get("wedges") or 0,
+        "uploaded_gb": uploaded_gb,
+        "downloaded_gb": downloaded_gb,
+        "vip_active": vip_active,
+    }
+
+
+async def watch_client_mids() -> set[str] | None:
+    """MAM ids of torrents already in the client (from the MID= comment MouseSearch sets)."""
+    if not torrent_client:
+        return None
+    status = await torrent_client.get_status()
+    if status.get("status") != "success":
+        return None
+    mids = set()
+    for torrent in await torrent_client.get_torrents_with_metadata():
+        match = re.search(r'MID=(\d+)', torrent.get('comment', '') or '')
+        if match:
+            mids.add(match.group(1))
+    return mids
+
+
+async def watch_add_torrent(item: dict, *, category: str, use_wedge: bool) -> dict:
+    payload = {
+        'torrent_url': item.get('download_link', ''),
+        'download_link': item.get('download_link', ''),
+        'category': category or app.config.get("TORRENT_CLIENT_CATEGORY", ""),
+        'id': str(item.get('id') or '0'),
+        'author': item.get('author_info') or "Unknown",
+        'title': item.get('title') or "Unknown",
+        'size': item.get('size') or '0 GiB',
+        'main_cat': str(item.get('main_cat') or ''),
+        'series_info': item.get('series_info', ''),
+        'catname': item.get('catname', '') or '',
+        'filetype': item.get('filetype', '') or '',
+        'free': item.get('free', 0) or 0,
+        'vip_freeleech': item.get('vip_freeleech', 0) or 0,
+        'personal_freeleech': item.get('personal_freeleech', 0) or 0,
+        'use_personal_freeleech': bool(use_wedge),
+    }
+    result, _status = await add_torrent_to_client(payload, allow_auto_personal_freeleech=False)
+    return result
+
+
+watch_runner.configure(
+    search=watch_mam_search,
+    account=watch_account_snapshot,
+    client_mids=watch_client_mids,
+    add=watch_add_torrent,
+    notify=send_auto_task_webhook_notification,
+    toast=broadcast_toast,
+    logger=app.logger,
+    config=lambda key, default=None: app.config.get(key, default),
+)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

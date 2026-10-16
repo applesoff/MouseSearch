@@ -729,6 +729,69 @@
             </div>
           </div>
 
+          <div class="card mb-3 border-secondary-subtle toggle-card">
+            <div
+              class="card-header border-bottom-0 bg-transparent d-flex justify-content-between align-items-center py-2 cursor-pointer noselect"
+              onclick="toggleCardSwitch('WATCHES_ENABLED')">
+              <span class="small fw-bold d-flex align-items-center"><i class="bi bi-binoculars me-2"></i> Watches
+                <span class="badge text-bg-warning ms-2">Beta</span></span>
+              <div class="form-check form-switch m-0">
+                <input class="form-check-input" type="checkbox" id="WATCHES_ENABLED" name="WATCHES_ENABLED"
+                  {% if WATCHES_ENABLED %}checked{% endif %} data-collapse-target="#collapse-watches"
+                  onclick="event.stopPropagation()">
+              </div>
+            </div>
+            <div id="collapse-watches" class="collapse {% if WATCHES_ENABLED %}show{% endif %}">
+              <div class="card-body border-top pt-2 pb-2">
+                <div class="small text-body-secondary mb-2">
+                  Saved searches that run every few minutes and send new matches to your client. A new watch never
+                  grabs what already exists. Watches never spend bonus points. Reload the page after saving to show
+                  the Watches button.
+                </div>
+                <div class="row g-2 mb-2">
+                  <div class="col-6">
+                    <label class="small text-body-secondary" for="WATCHES_UNSAT_RESERVE">Keep free unsat slots</label>
+                    <input type="number" min="0" step="1" class="form-control form-control-sm" id="WATCHES_UNSAT_RESERVE"
+                      name="WATCHES_UNSAT_RESERVE" value="{{ WATCHES_UNSAT_RESERVE }}">
+                  </div>
+                  <div class="col-6">
+                    <label class="small text-body-secondary" for="WATCHES_DAILY_GRAB_LIMIT">Max grabs per 24h</label>
+                    <input type="number" min="0" step="1" class="form-control form-control-sm" id="WATCHES_DAILY_GRAB_LIMIT"
+                      name="WATCHES_DAILY_GRAB_LIMIT" value="{{ WATCHES_DAILY_GRAB_LIMIT }}">
+                  </div>
+                  <div class="col-6">
+                    <label class="small text-body-secondary" for="WATCHES_MIN_RATIO">Never drop ratio below</label>
+                    <input type="number" min="1" step="0.1" class="form-control form-control-sm" id="WATCHES_MIN_RATIO"
+                      name="WATCHES_MIN_RATIO" value="{{ WATCHES_MIN_RATIO }}">
+                  </div>
+                </div>
+                <div class="border rounded p-2 bg-body">
+                  <div class="d-flex justify-content-between align-items-center cursor-pointer noselect"
+                    onclick="toggleCardSwitch('WATCHES_ALLOW_WEDGES')">
+                    <span class="small fw-semibold">Allow watches to spend Freeleech wedges</span>
+                    <div class="form-check form-switch m-0">
+                      <input class="form-check-input" type="checkbox" id="WATCHES_ALLOW_WEDGES"
+                        name="WATCHES_ALLOW_WEDGES" {% if WATCHES_ALLOW_WEDGES %}checked{% endif %}
+                        data-collapse-target="#collapse-watches-wedges" onclick="event.stopPropagation()">
+                    </div>
+                  </div>
+                  <div id="collapse-watches-wedges" class="collapse {% if WATCHES_ALLOW_WEDGES %}show{% endif %}">
+                    <div class="input-group input-group-sm mt-2">
+                      <span class="input-group-text">Always keep</span>
+                      <input type="number" min="0" step="1" class="form-control" id="WATCHES_WEDGE_RESERVE"
+                        name="WATCHES_WEDGE_RESERVE" value="{{ WATCHES_WEDGE_RESERVE }}">
+                      <span class="input-group-text">wedges</span>
+                    </div>
+                    <div class="form-text small">
+                      Only wedges you already own are used, and only by watches set to allow them. Wedges are never
+                      bought.
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <hr class="settings-divider my-4">
           <h6 class="text-uppercase section-title mb-3">Upload Credit Automation</h6>
 
