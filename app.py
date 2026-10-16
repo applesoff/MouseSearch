@@ -43,6 +43,7 @@ RAPIDFUZZ_AVAILABLE = fuzz is not None
 from clients import get_torrent_client, get_client_display_name, get_available_clients
 from hashing import calculate_torrent_hash_from_url, calculate_torrent_hash_from_bytes
 from hardcover.client import HardcoverAPIError, HardcoverClient
+import kindle
 from hardcover.resolver import HardcoverBatchRunner, HardcoverEnrichmentConfig, HardcoverResolver
 from watches import runner as watch_runner, store as watch_store
 from watches.routes import watches_bp
@@ -1010,10 +1011,22 @@ def get_app_version():
         app.logger.warning(f"Could not read version.txt: {e}")
     return "dev" # Default fallback
 
+def compute_static_asset_version() -> str:
+    """Content hash of the app's own JS/CSS, appended to their URLs so browsers refetch them after an update."""
+    digest = hashlib.sha1()
+    for rel_path in ("js/main.js", "js/watches.js", "style.css"):
+        try:
+            digest.update((Path(app.static_folder) / rel_path).read_bytes())
+        except OSError:
+            pass
+    return digest.hexdigest()[:12]
+
+STATIC_ASSET_VERSION = compute_static_asset_version()
+
 # Inject APP_VERSION into all templates
 @app.context_processor
 def inject_version():
-    return dict(APP_VERSION=get_app_version())
+    return dict(APP_VERSION=get_app_version(), STATIC_ASSET_VERSION=STATIC_ASSET_VERSION)
     
 # Define fallback values
 FALLBACK_CONFIG = {
@@ -1086,6 +1099,14 @@ FALLBACK_CONFIG = {
     "RESULTS_DISPLAY_FIELDS": ["narrator", "series", "file_size", "file_type", "seeders"],
     "RESULTS_SORT_MODE": DEFAULT_RESULTS_SORT_MODE,
     "SEARCH_FILTER_DEFAULTS": copy.deepcopy(DEFAULT_SEARCH_FILTER_DEFAULTS),
+    "KINDLE_ENABLED": False,
+    "KINDLE_EMAIL": "",
+    "KINDLE_FROM_EMAIL": "",
+    "KINDLE_SMTP_HOST": "",
+    "KINDLE_SMTP_PORT": 587,
+    "KINDLE_SMTP_SECURITY": "starttls",
+    "KINDLE_SMTP_USERNAME": "",
+    "KINDLE_SMTP_PASSWORD": "",
 }
 ENV_ONLY_CONFIG_KEYS = {"QBITTORRENT_VERIFY_WEBUI_CERTIFICATE"}
 
@@ -1662,6 +1683,7 @@ def load_config():
         "WATCHES_WEDGE_RESERVE",
         "WATCHES_UNSAT_RESERVE",
         "WATCHES_DAILY_GRAB_LIMIT",
+        "KINDLE_SMTP_PORT",
     ]:
         try:
             config[key] = int(config[key])
@@ -1758,6 +1780,7 @@ def load_config():
         "QBITTORRENT_VERIFY_WEBUI_CERTIFICATE",
         "WATCHES_ENABLED",
         "WATCHES_ALLOW_WEDGES",
+        "KINDLE_ENABLED",
     ]:
         config[key] = coerce_bool(config.get(key), FALLBACK_CONFIG[key])
         val = config[key]
@@ -1766,6 +1789,7 @@ def load_config():
             config[key] = str(val).lower() in ('true', '1', 't', 'yes', 'on')
 
     config["MAM_PROXY_URL"] = normalize_proxy_url(config.get("MAM_PROXY_URL"))
+    config["KINDLE_SMTP_SECURITY"] = kindle.normalize_smtp_security(config.get("KINDLE_SMTP_SECURITY"))
 
     config["RESULTS_DISPLAY_FIELDS"] = normalize_result_display_fields(
         config.get("RESULTS_DISPLAY_FIELDS"),
@@ -5982,6 +6006,7 @@ async def update_settings():
         "AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_ENABLED",
         "WATCHES_ENABLED",
         "WATCHES_ALLOW_WEDGES",
+        "KINDLE_ENABLED",
     }
     for key in FALLBACK_CONFIG.keys():
         if key in boolean_fields: config_to_update[key] = key in form
@@ -6416,6 +6441,139 @@ async def _perform_organization(hash_val: str, *, require_stable_source: bool = 
     )
     app.logger.info(f"[ORGANIZE] {details}")
     return True, details
+
+# --- SEND TO KINDLE ---
+
+KINDLE_CONFIG_KEYS = (
+    "KINDLE_EMAIL",
+    "KINDLE_FROM_EMAIL",
+    "KINDLE_SMTP_HOST",
+    "KINDLE_SMTP_PORT",
+    "KINDLE_SMTP_SECURITY",
+    "KINDLE_SMTP_USERNAME",
+    "KINDLE_SMTP_PASSWORD",
+)
+
+
+def kindle_book_info(torrent_meta: dict | None) -> dict:
+    """Extract book information for a manual Kindle send."""
+    torrent_meta = torrent_meta or {}
+    return {
+        "author": torrent_meta.get("author", ""),
+        "title": torrent_meta.get("title", ""),
+        "main_cat": str(torrent_meta.get("main_cat", "") or ""),
+    }
+
+
+async def send_torrent_to_kindle(
+    hash_val: str,
+    *,
+    book_info: dict | None = None,
+) -> tuple[bool, str]:
+    """
+    Email the best Kindle-compatible file from a finished torrent to the configured Kindle address.
+
+    The caller reports SMTP acceptance; Kindle delivery is not confirmed here.
+    """
+    hash_val = normalize_info_hash(hash_val)
+    if not app.config.get("KINDLE_ENABLED"):
+        return False, "Send to Kindle is disabled."
+    problem = kindle.kindle_config_problem(app.config)
+    if problem:
+        return False, f"Send to Kindle is not configured: {problem}"
+    if not torrent_client:
+        return False, "Client not initialized."
+
+    try:
+        info = await torrent_client.get_torrent_info(hash_val)
+    except Exception:
+        await torrent_client.login()
+        info = await torrent_client.get_torrent_info(hash_val)
+    if not info:
+        return False, f"Torrent {hash_val} not found in client."
+    if float(info.get("progress", 0) or 0) < 1:
+        return False, "Download has not finished yet."
+
+    metadata = load_database()
+    torrent_meta = metadata.get(hash_val) or {}
+    book_info = book_info or kindle_book_info(torrent_meta)
+    title = str(book_info.get("title") or info.get("name") or "").strip()
+    author = str(book_info.get("author") or "").strip()
+
+    content_path = resolve_local_content_path(app.config, info)
+    if content_path is None:
+        return False, f"Unable to resolve download path for torrent {hash_val}."
+    if not content_path.exists():
+        return False, f"Download path not found: {content_path}"
+
+    book_file = await asyncio.to_thread(kindle.find_kindle_file, content_path)
+    if book_file is None:
+        message = (
+            f"No Kindle-compatible file (EPUB, PDF, DOCX, ...) in '{title or hash_val}'. "
+            "MOBI/AZW3 are no longer accepted by Send to Kindle."
+        )
+        return False, message
+
+    subject = f"{title} - {author}" if title and author else (title or book_file.stem)
+    try:
+        message = await asyncio.to_thread(kindle.send_file_to_kindle, app.config, book_file, title=subject)
+    except kindle.KindleSendError as e:
+        app.logger.warning(f"[KINDLE] Send failed for {hash_val}: {e}")
+        return False, str(e)
+
+    app.logger.info(f"[KINDLE] {message}")
+    return True, message
+
+
+@app.route('/kindle/send', methods=['POST'])
+async def kindle_send():
+    payload = await request.get_json(silent=True) or {}
+    hash_val = normalize_info_hash(payload.get("hash") or "")
+    mid = str(payload.get("mid") or "").strip()
+
+    if not hash_val and mid:
+        metadata = load_database()
+        for hash_key, entry in metadata.items():
+            if str(entry.get("mid", "")) == mid:
+                hash_val = normalize_info_hash(hash_key)
+                break
+        if not hash_val and torrent_client:
+            try:
+                for torrent in await torrent_client.get_torrents_with_metadata():
+                    mid_match = re.search(r'MID=(\d+)', torrent.get('comment', '') or '')
+                    if mid_match and mid_match.group(1) == mid:
+                        hash_val = normalize_info_hash(torrent.get('hash', ''))
+                        break
+            except Exception as e:
+                app.logger.warning(f"[KINDLE] Failed to resolve MID {mid}: {e}")
+
+    if not hash_val:
+        return jsonify({"status": "error", "message": "This book was not found in your torrent client."}), 404
+
+    book_info = None
+    if payload.get("title"):
+        book_info = kindle_book_info(payload)
+    try:
+        success, message = await send_torrent_to_kindle(hash_val, book_info=book_info)
+    except Exception as e:
+        app.logger.error(f"[KINDLE] Exception sending {hash_val}: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": f"Internal error: {e}"}), 500
+    return jsonify({"status": "success" if success else "error", "message": message}), 200 if success else 400
+
+
+@app.route('/api/settings/test-kindle', methods=['POST'])
+async def test_kindle_settings():
+    payload = await request.get_json(silent=True) or {}
+    probe_config = dict(app.config)
+    for key in KINDLE_CONFIG_KEYS:
+        if key in payload and (key != "KINDLE_SMTP_PASSWORD" or payload[key]):
+            probe_config[key] = payload[key]
+    try:
+        message = await asyncio.to_thread(kindle.test_connection, probe_config)
+    except kindle.KindleSendError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    return jsonify({"status": "success", "message": message})
+
 
 @app.route('/events')
 async def events():

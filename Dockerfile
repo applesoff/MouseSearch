@@ -20,6 +20,7 @@ COPY templates ./templates
 COPY clients ./clients
 COPY hardcover ./hardcover
 COPY watches ./watches
+COPY kindle.py ./
 
 COPY version.txt ./version.txt
 
