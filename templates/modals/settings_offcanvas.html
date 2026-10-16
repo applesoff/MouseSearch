@@ -791,6 +791,21 @@
                     <span id="settings-kindle-status-message"></span>
                   </div>
                 </div>
+
+                <div class="border rounded p-2 bg-body mt-3">
+                  <div class="d-flex justify-content-between align-items-center cursor-pointer noselect"
+                    onclick="toggleCardSwitch('KINDLE_AUTO_SEND')">
+                    <span class="small fw-semibold">Automatically send finished e-books</span>
+                    <div class="form-check form-switch m-0">
+                      <input class="form-check-input" type="checkbox" id="KINDLE_AUTO_SEND" name="KINDLE_AUTO_SEND"
+                        {% if KINDLE_AUTO_SEND %}checked{% endif %} onclick="event.stopPropagation()">
+                    </div>
+                  </div>
+                  <div class="form-text small">
+                    When an e-book you downloaded through MouseSearch (including Watches) finishes, it is emailed to
+                    your Kindle once. Audiobooks are never sent.
+                  </div>
+                </div>
               </div>
             </div>
           </div>
