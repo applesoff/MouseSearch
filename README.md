@@ -551,7 +551,7 @@ This setup guarantees that both paths point to the same underlying device, allow
 
 ## [BETA] Watches
 
-Watches are saved MAM searches (an author, a series, a keyword) that MouseSearch checks on a schedule, sending new matches to your torrent client. Turn them on in **Settings → MAM Helpers → Watches**, reload the page, then use the **Watches** button under the search box.
+Watches are saved MAM searches (an author, a series, a keyword) that MouseSearch checks on a schedule, sending new matches to your torrent client. Turn them on in **Settings → Watches**, reload the page, then use the **Watches** button under the search box.
 
 Watches are built to protect your account first:
 

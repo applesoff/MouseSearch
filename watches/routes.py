@@ -24,7 +24,7 @@ def _busy():
 @watches_bp.before_request
 async def _require_enabled():
     if not runner.setting("WATCHES_ENABLED"):
-        return _error("Watches are disabled. Enable them under Settings → MAM Helpers.", 403)
+        return _error("Watches are disabled. Enable them under Settings → Watches.", 403)
 
 
 @watches_bp.route("", methods=["GET"])
