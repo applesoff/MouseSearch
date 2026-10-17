@@ -1,6 +1,11 @@
 import unittest
 
-from app import build_relative_path_from_template, relative_path_tokens_from_metadata
+from app import (
+    build_relative_path_from_template,
+    invert_author_name,
+    relative_path_tokens_from_metadata,
+    split_author_names,
+)
 
 
 SHELFMARK_STYLE = "{Author}/{Title}{ - Series}{ #SeriesNumber}{ (Year)}"
@@ -9,6 +14,9 @@ SHELFMARK_STYLE = "{Author}/{Title}{ - Series}{ #SeriesNumber}{ (Year)}"
 def tokens(**overrides):
     values = {
         "{Author}": "",
+        "{AuthorLastFirst}": "",
+        "{FirstAuthor}": "",
+        "{FirstAuthorLastFirst}": "",
         "{Series}": "",
         "{SeriesNumber}": "",
         "{Title}": "",
@@ -93,6 +101,64 @@ class RelativePathTokensFromMetadataTests(unittest.TestCase):
         self.assertEqual(relative_path_tokens_from_metadata({"year": "unknown"})["{Year}"], "")
         self.assertEqual(relative_path_tokens_from_metadata({"year": 2017})["{Year}"], "2017")
         self.assertEqual(relative_path_tokens_from_metadata({"year": "2017-11-14"})["{Year}"], "2017")
+
+
+class AuthorNameTests(unittest.TestCase):
+    def test_invert_simple_names(self):
+        self.assertEqual(invert_author_name("Frank Herbert"), "Herbert, Frank")
+        self.assertEqual(invert_author_name("J.R.R. Tolkien"), "Tolkien, J.R.R.")
+        self.assertEqual(invert_author_name("Kevin J. Anderson"), "Anderson, Kevin J.")
+
+    def test_invert_keeps_particles_with_surname(self):
+        self.assertEqual(invert_author_name("Ursula K. Le Guin"), "Le Guin, Ursula K.")
+        self.assertEqual(invert_author_name("Ludwig van Beethoven"), "van Beethoven, Ludwig")
+        self.assertEqual(invert_author_name("Charles de Lint"), "de Lint, Charles")
+        # A particle is never taken as the whole given name.
+        self.assertEqual(invert_author_name("Van Morrison"), "Morrison, Van")
+
+    def test_invert_keeps_suffixes_at_end(self):
+        self.assertEqual(invert_author_name("Kurt Vonnegut Jr."), "Vonnegut, Kurt, Jr.")
+        self.assertEqual(invert_author_name("Kurt Vonnegut, Jr."), "Vonnegut, Kurt, Jr.")
+        self.assertEqual(invert_author_name("Henry Ford II"), "Ford, Henry, II")
+
+    def test_invert_single_and_empty_names(self):
+        self.assertEqual(invert_author_name("Plato"), "Plato")
+        self.assertEqual(invert_author_name("Plato Jr."), "Plato Jr.")
+        self.assertEqual(invert_author_name(""), "")
+
+    def test_split_author_names(self):
+        self.assertEqual(split_author_names("Frank Herbert, Kevin J. Anderson"), ["Frank Herbert", "Kevin J. Anderson"])
+        self.assertEqual(split_author_names("Douglas Preston & Lincoln Child"), ["Douglas Preston", "Lincoln Child"])
+        self.assertEqual(split_author_names("Kurt Vonnegut, Jr., Joe Hill"), ["Kurt Vonnegut Jr.", "Joe Hill"])
+        self.assertEqual(split_author_names("  "), [])
+        self.assertEqual(split_author_names(None), [])
+
+    def test_author_tokens_from_metadata(self):
+        values = relative_path_tokens_from_metadata({"author": "Brian Herbert, Kevin J. Anderson", "title": "Dune"})
+        self.assertEqual(values["{Author}"], "Brian Herbert, Kevin J. Anderson")
+        # sanitize_filename drops the trailing "." a folder name cannot end with on Windows.
+        self.assertEqual(values["{AuthorLastFirst}"], "Herbert, Brian & Anderson, Kevin J")
+        self.assertEqual(values["{FirstAuthor}"], "Brian Herbert")
+        self.assertEqual(values["{FirstAuthorLastFirst}"], "Herbert, Brian")
+        self.assertEqual(
+            build_relative_path_from_template("{FirstAuthorLastFirst}/{Title}", values), "Herbert, Brian/Dune"
+        )
+        self.assertEqual(
+            build_relative_path_from_template("{AuthorLastFirst}/{Title}", values), "Herbert, Brian & Anderson, Kevin J/Dune"
+        )
+
+    def test_author_tokens_are_not_confused_with_author(self):
+        values = tokens(Author="A", AuthorLastFirst="B", FirstAuthor="C", FirstAuthorLastFirst="D")
+        self.assertEqual(
+            build_relative_path_from_template("{Author}/{AuthorLastFirst}/{FirstAuthor}/{FirstAuthorLastFirst}", values),
+            "A/B/C/D",
+        )
+        self.assertEqual(build_relative_path_from_template("{by FirstAuthor}", values), "by C")
+
+    def test_missing_author_leaves_author_tokens_blank(self):
+        values = relative_path_tokens_from_metadata({})
+        for token in ("{Author}", "{AuthorLastFirst}", "{FirstAuthor}", "{FirstAuthorLastFirst}"):
+            self.assertEqual(values[token], "")
 
 
 if __name__ == "__main__":

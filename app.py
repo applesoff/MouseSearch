@@ -4663,8 +4663,77 @@ def normalize_release_year(value):
     return str(year) if 1000 <= year <= 2999 else ""
 
 
+# Words that end a name rather than start a surname ("Kurt Vonnegut Jr.").
+_NAME_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "phd", "md"}
+# Surname particles kept with the last name ("Ursula K. Le Guin" -> "Le Guin").
+_NAME_PARTICLES = {"van", "von", "de", "der", "den", "del", "della", "des", "di", "da", "du", "la", "le", "ter", "ten", "dos", "das", "st", "st."}
+
+
+def _name_key(word):
+    return word.lower().rstrip(".,")
+
+
+def split_author_names(author):
+    """
+    Split a joined author string ("Frank Herbert, Kevin J. Anderson") into names.
+
+    Authors are stored joined with ", ", so a bare suffix after a comma
+    ("Kurt Vonnegut, Jr.") is reattached to the name before it.
+    Mirrors splitAuthorNames() in main.js.
+    """
+    names = []
+    for part in re.split(r"\s*(?:,|;|\s&\s)\s*", str(author or "")):
+        part = " ".join(part.split())
+        if not part:
+            continue
+        if names and _name_key(part) in _NAME_SUFFIXES:
+            names[-1] = f"{names[-1]} {part}"
+        else:
+            names.append(part)
+    return names
+
+
+def invert_author_name(name):
+    """
+    Turn "First Last" into "Last, First", keeping particles with the surname and
+    suffixes at the end: "Kurt Vonnegut Jr." -> "Vonnegut, Kurt, Jr.".
+    Single-word names are returned unchanged. Mirrors invertAuthorName() in main.js.
+    """
+    words = [word for word in (w.strip(",") for w in str(name or "").split()) if word]
+    suffixes = []
+    while len(words) > 1 and _name_key(words[-1]) in _NAME_SUFFIXES:
+        suffixes.insert(0, words.pop())
+    if len(words) < 2:
+        return " ".join(words + suffixes)
+
+    surname_start = len(words) - 1
+    while surname_start > 1 and _name_key(words[surname_start - 1]) in _NAME_PARTICLES:
+        surname_start -= 1
+
+    given = " ".join(words[:surname_start])
+    inverted = f"{' '.join(words[surname_start:])}, {given}"
+    return ", ".join([inverted] + suffixes)
+
+
+def author_token_values(author):
+    """
+    Raw (unsanitized) values for the author tokens of a joined author string.
+    Mirrors authorTokenValues() in main.js.
+    """
+    names = split_author_names(author)
+    return {
+        "{Author}": str(author or "").strip(),
+        "{AuthorLastFirst}": " & ".join(invert_author_name(name) for name in names),
+        "{FirstAuthor}": names[0] if names else "",
+        "{FirstAuthorLastFirst}": invert_author_name(names[0]) if names else "",
+    }
+
+
 # Longest names first so "SeriesNumber" is never read as "Series" + "Number".
-RELATIVE_PATH_TOKEN_NAMES = ("SeriesNumber", "Category", "Author", "Series", "Format", "Genre", "Title", "Year")
+RELATIVE_PATH_TOKEN_NAMES = (
+    "FirstAuthorLastFirst", "AuthorLastFirst", "SeriesNumber", "FirstAuthor",
+    "Category", "Author", "Series", "Format", "Genre", "Title", "Year",
+)
 _REL_PATH_GROUP_RE = re.compile(r"\{([^{}]*)\}")
 _REL_PATH_TOKEN_NAME_RE = re.compile(
     r"(?<![A-Za-z])(" + "|".join(RELATIVE_PATH_TOKEN_NAMES) + r")(?![A-Za-z])"
@@ -4725,8 +4794,9 @@ def relative_path_tokens_from_metadata(torrent_meta):
         text = str(value or "").strip()
         return sanitize_filename(text) if text else ""
 
+    author_values = author_token_values(torrent_meta.get("author"))
     return {
-        "{Author}": clean(torrent_meta.get("author")),
+        **{token: clean(value) for token, value in author_values.items()},
         "{Series}": clean(series_name),
         "{SeriesNumber}": clean(series_number),
         "{Title}": clean(torrent_meta.get("title")),

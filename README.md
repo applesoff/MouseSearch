@@ -318,7 +318,7 @@ For book enrichment only, the minimum required scope is `read:catalog:search`. L
 | `AUTO_ORGANIZE_ON_SCHEDULE` | No | Set to `true` to enable scheduled auto-organization. Defaults to `false`. |
 | `AUTO_ORGANIZE_INTERVAL_HOURS` | No | Number of hours between scheduled organization scans (only applies if `AUTO_ORGANIZE_ON_SCHEDULE` is `true`). Defaults to `1`. |
 | `AUTO_ORGANIZE_USE_COPY` | No | Set to `true` to copy files instead of hardlinking. Useful if download/organize paths are on different filesystems. Defaults to `false`. |
-| `DEFAULT_RELATIVE_PATH_TEMPLATE` | No | Default relative folder template used for organization paths. Supports `{Author}`, `{Series}`, `{SeriesNumber}`, `{Title}`, `{Category}`, `{Genre}`, `{Format}`, and `{Year}` tokens, plus optional text such as `{ - Series}` (see [Path Customization](#path-customization)). Defaults to `{Author}/{Title}`. |
+| `DEFAULT_RELATIVE_PATH_TEMPLATE` | No | Default relative folder template used for organization paths. Supports `{Author}`, `{AuthorLastFirst}`, `{FirstAuthor}`, `{FirstAuthorLastFirst}`, `{Series}`, `{SeriesNumber}`, `{Title}`, `{Category}`, `{Genre}`, `{Format}`, and `{Year}` tokens, plus optional text such as `{ - Series}` (see [Path Customization](#path-customization)). Defaults to `{Author}/{Title}`. |
 | `ORGANIZED_PATH` | If auto-organization is enabled | The default *container* path for your organized library (e.g., `/downloads/organized/`). Additional destination paths can be configured from the Settings UI and assigned to media types. |
 | `LOCAL_TORRENT_DOWNLOAD_PATH` | If auto-organization is enabled | The local path MouseSearch can access for completed torrent files (e.g., `/downloads/torrents/`). |
 | `REMOTE_TORRENT_DOWNLOAD_PATH` | No | Optional remote/client-side view of that same download directory. Recommended when your torrent client runs in a different filesystem namespace, such as Docker vs bare metal. |
@@ -465,6 +465,9 @@ MouseSearch supports configurable default organization templates via Settings ->
 | Token | Value | Example |
 | --- | --- | --- |
 | `{Author}` | Author name | `Frank Herbert` |
+| `{AuthorLastFirst}` | Every author as Last, First, joined with ` & ` | `Preston, Douglas & Child, Lincoln` |
+| `{FirstAuthor}` | Only the first listed author | `Frank Herbert` |
+| `{FirstAuthorLastFirst}` | Only the first listed author, as Last, First | `Herbert, Frank` |
 | `{Series}` | Series name (blank if the torrent has no series) | `Dune` |
 | `{SeriesNumber}` | Position within the series | `1` |
 | `{Title}` | Torrent title | `Dune` |
@@ -482,6 +485,8 @@ MouseSearch supports configurable default organization templates via Settings ->
   | In a series, year known | `Brandon Sanderson/Oathbringer - The Stormlight Archive #3 (2017)` |
   | Standalone, year known | `Andy Weir/Project Hail Mary (2021)` |
   | Standalone, no year | `Andy Weir/Project Hail Mary` |
+
+  **Last, First names:** the surname is the last word of the name, with particles such as `van`, `de` or `Le` kept with it and suffixes kept at the end, so `Ursula K. Le Guin` becomes `Le Guin, Ursula K.` and `Kurt Vonnegut Jr.` becomes `Vonnegut, Kurt, Jr.`. Single-word names (`Plato`) are left as they are. Use `{FirstAuthor}` or `{FirstAuthorLastFirst}` to keep co-written books in the first author's folder.
 
   The text may include `/`, so `{Author}/{Series/}{Title}` adds a series folder only for books in a series. Leading and trailing spaces are trimmed from each folder name.
 - **Environment Default**: Set `DEFAULT_RELATIVE_PATH_TEMPLATE` in `.env` to control the default template used by the app.
