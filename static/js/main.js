@@ -1858,7 +1858,9 @@ function localizeDates(scope = document) {
 
 function sanitizeFilename(name) {
     if (!name) return "Unknown";
-    return name.replace(/[<>:"/\\|?*]/g, '').trim();
+    // Strip leading/trailing dots and spaces like sanitize_filename() in app.py:
+    // Windows (and SMB shares) cannot hold a folder name ending in ".".
+    return name.replace(/[<>:"/\\|?*]/g, '').trim().replace(/^[. ]+|[. ]+$/g, '');
 }
 
 const DEFAULT_REL_PATH_TEMPLATE = "{Author}/{Title}";
@@ -1918,8 +1920,74 @@ function normalizeReleaseYear(value) {
     return year >= 1000 && year <= 2999 ? String(year) : '';
 }
 
+// Words that end a name rather than start a surname ("Kurt Vonnegut Jr.").
+const NAME_SUFFIXES = new Set(['jr', 'sr', 'ii', 'iii', 'iv', 'phd', 'md']);
+// Surname particles kept with the last name ("Ursula K. Le Guin" -> "Le Guin").
+const NAME_PARTICLES = new Set(['van', 'von', 'de', 'der', 'den', 'del', 'della', 'des', 'di', 'da', 'du', 'la', 'le', 'ter', 'ten', 'dos', 'das', 'st', 'st.']);
+
+function nameKey(word) {
+    return word.toLowerCase().replace(/[.,]+$/, '');
+}
+
+/**
+ * Split a joined author string ("Frank Herbert, Kevin J. Anderson") into names.
+ * Authors are stored joined with ", ", so a bare suffix after a comma
+ * ("Kurt Vonnegut, Jr.") is reattached to the name before it.
+ * Mirrors split_author_names() in app.py.
+ */
+function splitAuthorNames(author) {
+    const names = [];
+    for (const rawPart of String(author || '').split(/\s*(?:,|;|\s&\s)\s*/)) {
+        const part = rawPart.split(/\s+/).filter(Boolean).join(' ');
+        if (!part) continue;
+        if (names.length && NAME_SUFFIXES.has(nameKey(part))) {
+            names[names.length - 1] += ` ${part}`;
+        } else {
+            names.push(part);
+        }
+    }
+    return names;
+}
+
+/**
+ * Turn "First Last" into "Last, First", keeping particles with the surname and
+ * suffixes at the end: "Kurt Vonnegut Jr." -> "Vonnegut, Kurt, Jr.".
+ * Single-word names are returned unchanged. Mirrors invert_author_name() in app.py.
+ */
+function invertAuthorName(name) {
+    const words = String(name || '').split(/\s+/).map(word => word.replace(/^,+|,+$/g, '')).filter(Boolean);
+    const suffixes = [];
+    while (words.length > 1 && NAME_SUFFIXES.has(nameKey(words[words.length - 1]))) {
+        suffixes.unshift(words.pop());
+    }
+    if (words.length < 2) return [...words, ...suffixes].join(' ');
+
+    let surnameStart = words.length - 1;
+    while (surnameStart > 1 && NAME_PARTICLES.has(nameKey(words[surnameStart - 1]))) {
+        surnameStart -= 1;
+    }
+
+    const given = words.slice(0, surnameStart).join(' ');
+    const inverted = `${words.slice(surnameStart).join(' ')}, ${given}`;
+    return [inverted, ...suffixes].join(', ');
+}
+
+/**
+ * Raw (unsanitized) values for the author tokens of a joined author string,
+ * keyed like buildRelativePathFromTemplate() values. Mirrors author_token_values() in app.py.
+ */
+function authorTokenValues(author) {
+    const names = splitAuthorNames(author);
+    return {
+        author: String(author || '').trim(),
+        authorLastFirst: names.map(invertAuthorName).join(' & '),
+        firstAuthor: names[0] || '',
+        firstAuthorLastFirst: names.length ? invertAuthorName(names[0]) : ''
+    };
+}
+
 // Longest names first so "SeriesNumber" is never read as "Series" + "Number".
-const REL_PATH_TOKEN_NAME_RE = /(^|[^A-Za-z])(SeriesNumber|Category|Author|Series|Format|Genre|Title|Year)(?![A-Za-z])/;
+const REL_PATH_TOKEN_NAME_RE = /(^|[^A-Za-z])(FirstAuthorLastFirst|AuthorLastFirst|SeriesNumber|FirstAuthor|Category|Author|Series|Format|Genre|Title|Year)(?![A-Za-z])/;
 
 /**
  * Find every brace group in a template. A group is either a bare token ("{Series}")
@@ -1950,6 +2018,9 @@ function buildRelativePathFromTemplate(template, values) {
     const text = normalizeRelPathTemplate(template);
     const replacements = {
         '{Author}': values.author || '',
+        '{AuthorLastFirst}': values.authorLastFirst || '',
+        '{FirstAuthor}': values.firstAuthor || '',
+        '{FirstAuthorLastFirst}': values.firstAuthorLastFirst || '',
         '{Series}': values.series || '',
         '{SeriesNumber}': values.seriesNumber || '',
         '{Title}': values.title || '',
@@ -1995,6 +2066,9 @@ function getRelPathTemplateValue() {
  */
 const REL_PATH_TOKENS = [
     { token: '{Author}', key: 'author', label: 'Author' },
+    { token: '{AuthorLastFirst}', key: 'authorLastFirst', label: 'Author (Last, First)' },
+    { token: '{FirstAuthor}', key: 'firstAuthor', label: 'First Author' },
+    { token: '{FirstAuthorLastFirst}', key: 'firstAuthorLastFirst', label: 'First Author (Last, First)' },
     { token: '{Series}', key: 'series', label: 'Series' },
     { token: '{SeriesNumber}', key: 'seriesNumber', label: 'Series Number' },
     { token: '{Title}', key: 'title', label: 'Title' },
@@ -3704,7 +3778,7 @@ document.addEventListener("DOMContentLoaded", async function () {
         };
 
         const previewData = {
-            author: 'J.K. Rowling',
+            ...authorTokenValues('J.K. Rowling'),
             series: 'Harry Potter',
             seriesNumber: '1',
             title: "Harry Potter and the Sorcerer's Stone",
@@ -7156,7 +7230,10 @@ document.addEventListener("DOMContentLoaded", async function () {
 
             if (autoOrganizeEnabled) {
                 // --- Auto-Organize Logic (Populate Confirm Modal) ---
-                const cleanAuthor = sanitizeFilename(downloadData.author);
+                const authorValues = Object.fromEntries(
+                    Object.entries(authorTokenValues(downloadData.author))
+                        .map(([key, value]) => [key, value ? sanitizeFilename(value) : ''])
+                );
                 const cleanTitle = sanitizeFilename(downloadData.title);
                 const cleanSeries = seriesName ? sanitizeFilename(seriesName) : "";
                 const cleanSeriesNumber = seriesNumber ? sanitizeFilename(seriesNumber) : "";
@@ -7170,7 +7247,7 @@ document.addEventListener("DOMContentLoaded", async function () {
                 // Seed the tag builder with this torrent's values, then apply the
                 // configured template. Editing either field from here is up to the user.
                 confirmTokenValues = {
-                    author: cleanAuthor,
+                    ...authorValues,
                     series: cleanSeries,
                     seriesNumber: cleanSeriesNumber,
                     title: cleanTitle,
