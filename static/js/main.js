@@ -6507,15 +6507,44 @@ document.addEventListener("DOMContentLoaded", async function () {
         return { isFreeleech: false, reason: null };
     }
 
+    // Mirrors parse_size_to_gb in app.py (MB and MiB both binary) so the threshold
+    // check matches the server. Returns null when the size can't be parsed.
+    function parseSizeToMiB(sizeValue) {
+        const text = String(sizeValue ?? '').trim().replace(/,/g, '');
+        const match = text.match(/^([-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*([KMGT]?i?B)?$/i);
+        if (!match) return null;
+        const value = Number.parseFloat(match[1]);
+        if (!Number.isFinite(value)) return null;
+        const unit = (match[2] || 'GB').toUpperCase().replace('I', '');
+        const factors = { TB: 1024 * 1024, GB: 1024, MB: 1, KB: 1 / 1024, B: 1 / (1024 * 1024) };
+        return value * (factors[unit] ?? 1024);
+    }
+
+    // Whether the server will spend a wedge on its own for this download
+    // (AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD). Reads saved settings, not unsaved edits.
+    function getAutoWedgeState(data) {
+        const saved = settingsSnapshot || {};
+        if (!saved.AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD || !data?.id) return { applies: false, belowMinimum: false };
+        if (computeTorrentFreeleechState(data).isFreeleech) return { applies: false, belowMinimum: false };
+
+        if (saved.AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_ENABLED) {
+            const minMb = Number.parseFloat(saved.AUTO_BUY_PERSONAL_FL_ON_DOWNLOAD_MIN_SIZE_MB) || 0;
+            const sizeMib = parseSizeToMiB(data.size);
+            if (sizeMib === null || sizeMib <= minMb) return { applies: false, belowMinimum: true, minMb };
+        }
+        return { applies: true, belowMinimum: false };
+    }
+
     function updateConfirmModalFreeleechUI() {
         if (!confirmModalEl) return;
 
         const state = computeTorrentFreeleechState(pendingDownloadData);
+        const autoWedge = getAutoWedgeState(pendingDownloadData);
         const downloadBtn = document.getElementById('confirm-download-btn');
 
         // 1. Handle Start Download Button Tooltip
         if (downloadBtn) {
-            if (state.isFreeleech) {
+            if (state.isFreeleech || autoWedge.applies) {
                 // Set the tooltip text and refresh
                 downloadBtn.setAttribute('title', 'This download will be Freeleech');
                 // We ensure the data-bs-toggle is present
@@ -6565,8 +6594,21 @@ document.addEventListener("DOMContentLoaded", async function () {
                 disabledReason = 'Checking torrent status…';
             }
 
+            // Auto-Use will spend a wedge anyway: show the button as filled/on (left
+            // enabled so it isn't faded; the click handler ignores it).
+            const autoActive = !disabledReason && autoWedge.applies;
+            personalFlBtn.classList.toggle('btn-warning', autoActive);
+            personalFlBtn.classList.toggle('btn-outline-warning', !autoActive);
+            personalFlBtn.dataset.autoWedge = autoActive ? '1' : '';
+            personalFlBtn.setAttribute('aria-pressed', autoActive ? 'true' : 'false');
+
             personalFlBtn.disabled = !!disabledReason;
-            const tooltip = disabledReason || 'Use one Freeleech Wedge when this download starts';
+            let tooltip = disabledReason || 'Use one Freeleech Wedge when this download starts';
+            if (autoActive) {
+                tooltip = 'A Freeleech Wedge will be used automatically (Auto-Use is on)';
+            } else if (!disabledReason && autoWedge.belowMinimum) {
+                tooltip = `Below the Auto-Use minimum (${autoWedge.minMb} MB) — click to use a Freeleech Wedge anyway`;
+            }
             tooltipTarget.setAttribute('title', tooltip);
             tooltipTarget.setAttribute('data-bs-original-title', tooltip);
             tooltipTarget.setAttribute('data-bs-toggle', 'tooltip');
@@ -6576,6 +6618,7 @@ document.addEventListener("DOMContentLoaded", async function () {
 
     personalFlBtn?.addEventListener('click', function () {
         if (!pendingDownloadData?.id) return;
+        if (personalFlBtn.dataset.autoWedge === '1') return;
 
         reopenDownloadModalAfterWedge = true;
         if (confirmModalEl?.classList.contains('show')) {
