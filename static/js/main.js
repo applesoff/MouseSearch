@@ -1987,7 +1987,7 @@ function authorTokenValues(author) {
 }
 
 // Longest names first so "SeriesNumber" is never read as "Series" + "Number".
-const REL_PATH_TOKEN_NAME_RE = /(^|[^A-Za-z])(FirstAuthorLastFirst|AuthorLastFirst|SeriesNumber|FirstAuthor|Category|Author|Series|Format|Genre|Title|Year)(?![A-Za-z])/;
+const REL_PATH_TOKEN_NAME_RE = /(^|[^A-Za-z])(FirstAuthorLastFirst|AuthorLastFirst|SeriesNumber|FirstAuthor|Category|Author|Narrator|Series|Format|Genre|Title|Year)(?![A-Za-z])/;
 
 /**
  * Find every brace group in a template. A group is either a bare token ("{Series}")
@@ -2008,6 +2008,13 @@ function parseRelPathTemplateGroups(template) {
             group.token = `{${name}}`;
             group.prefix = content.slice(0, nameStart);
             group.suffix = content.slice(nameStart + name.length);
+            if (name === 'SeriesNumber') {
+                const padding = /^:0(10|[1-9])(?![0-9])/.exec(group.suffix);
+                if (padding) {
+                    group.paddingWidth = Number(padding[1]);
+                    group.suffix = group.suffix.slice(padding[0].length);
+                }
+            }
         }
         groups.push(group);
     }
@@ -2021,6 +2028,7 @@ function buildRelativePathFromTemplate(template, values) {
         '{AuthorLastFirst}': values.authorLastFirst || '',
         '{FirstAuthor}': values.firstAuthor || '',
         '{FirstAuthorLastFirst}': values.firstAuthorLastFirst || '',
+        '{Narrator}': values.narrator || '',
         '{Series}': values.series || '',
         '{SeriesNumber}': values.seriesNumber || '',
         '{Title}': values.title || '',
@@ -2039,7 +2047,11 @@ function buildRelativePathFromTemplate(template, values) {
             output += group.raw;
             continue;
         }
-        const value = String(replacements[group.token] || '');
+        let value = String(replacements[group.token] || '');
+        if (group.paddingWidth && /^[0-9]+(?:\.[0-9]+)?$/.test(value)) {
+            const [integer, fraction] = value.split('.');
+            value = integer.padStart(group.paddingWidth, '0') + (fraction === undefined ? '' : `.${fraction}`);
+        }
         if (value) output += `${group.prefix}${value}${group.suffix}`;
     }
     output += text.slice(cursor);
@@ -2069,6 +2081,7 @@ const REL_PATH_TOKENS = [
     { token: '{AuthorLastFirst}', key: 'authorLastFirst', label: 'Author (Last, First)' },
     { token: '{FirstAuthor}', key: 'firstAuthor', label: 'First Author' },
     { token: '{FirstAuthorLastFirst}', key: 'firstAuthorLastFirst', label: 'First Author (Last, First)' },
+    { token: '{Narrator}', key: 'narrator', label: 'Narrator' },
     { token: '{Series}', key: 'series', label: 'Series' },
     { token: '{SeriesNumber}', key: 'seriesNumber', label: 'Series Number' },
     { token: '{Title}', key: 'title', label: 'Title' },
@@ -2145,11 +2158,21 @@ function normalizeSeriesNumber(seriesNumber) {
     if (!numberText) return '';
 
     const parsed = Number(numberText);
+    if (Number.isFinite(parsed) && parsed < 0) return '';
     if (!Number.isNaN(parsed) && Number.isFinite(parsed) && parsed >= 0) {
         return Number.isInteger(parsed) ? String(parsed) : String(parsed).replace(/\.?0+$/, '');
     }
 
     return numberText;
+}
+
+// Decode entity references only, never interpret metadata as HTML markup.
+function decodeMamSeriesName(value) {
+    const decoder = document.createElement('textarea');
+    return String(value || '').replace(/&(?:#\d+|#x[\da-f]+|[a-z][a-z\d]+);/gi, entity => {
+        decoder.innerHTML = entity;
+        return decoder.value;
+    });
 }
 
 function getPrimarySeriesInfo(seriesInfo) {
@@ -2159,7 +2182,7 @@ function getPrimarySeriesInfo(seriesInfo) {
         const values = Object.values(data);
         if (values.length > 0 && Array.isArray(values[0])) {
             const [seriesName, seriesNumber] = values[0];
-            const name = String(seriesName || '').trim();
+            const name = decodeMamSeriesName(seriesName).trim();
             if (!name) return null;
             return {
                 name,
@@ -3779,6 +3802,7 @@ document.addEventListener("DOMContentLoaded", async function () {
 
         const previewData = {
             ...authorTokenValues('J.K. Rowling'),
+            narrator: 'Stephen Fry',
             series: 'Harry Potter',
             seriesNumber: '1',
             title: "Harry Potter and the Sorcerer's Stone",
@@ -7190,6 +7214,7 @@ document.addEventListener("DOMContentLoaded", async function () {
             category: resultItem ? (resultItem.querySelector('.category-dropdown')?.value || '') : (document.getElementById('detail-cat-select')?.value || ''),
             id: button.dataset.id,
             author: button.dataset.author || "Unknown",
+            narrator: button.dataset.narrator || "",
             title: button.dataset.title || "Unknown",
             size: button.dataset.size || '0 GiB',
             main_cat: button.dataset.mainCat || '',
@@ -7248,6 +7273,7 @@ document.addEventListener("DOMContentLoaded", async function () {
                 // configured template. Editing either field from here is up to the user.
                 confirmTokenValues = {
                     ...authorValues,
+                    narrator: downloadData.narrator ? sanitizeFilename(downloadData.narrator) : "",
                     series: cleanSeries,
                     seriesNumber: cleanSeriesNumber,
                     title: cleanTitle,
@@ -7512,6 +7538,7 @@ document.addEventListener("DOMContentLoaded", async function () {
         dlBtn.dataset.torrentUrl = data.download_link;
         dlBtn.dataset.id = data.id;
         dlBtn.dataset.author = authors;
+        dlBtn.dataset.narrator = parseMamJson(data.narrator_info) || "";
         dlBtn.dataset.title = data.title;
         dlBtn.dataset.size = data.size;
         dlBtn.dataset.mainCat = data.main_cat;

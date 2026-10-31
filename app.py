@@ -4188,6 +4188,7 @@ async def add_torrent_to_client(
     torrent_url = incoming_data.get('torrent_url') or incoming_data.get('url')
     author = incoming_data.get('author', 'Unknown')
     title = incoming_data.get('title', 'Unknown')
+    narrator = parse_mam_metadata(incoming_data.get("narrator", ""))
     # Kept for {Genre}/{Format}/{Category} when the path template is rendered server-side.
     catname = incoming_data.get('catname', '')
     filetype = incoming_data.get('filetype', '')
@@ -4319,6 +4320,7 @@ async def add_torrent_to_client(
                 "added_on": datetime.now().isoformat(),
                 "status": "pending",
                 "retry_count": 0,
+                "narrator": narrator,
                 "series_info": series_info,
                 "category": get_category_name(main_cat),
                 "main_cat": main_cat,
@@ -4387,6 +4389,7 @@ async def add_torrent_to_client(
                 "mid": id, "author": author, "title": title,
                 "added_on": datetime.now().isoformat(),
                 "status": "pending", "retry_count": 0,
+                "narrator": narrator,
                 "series_info": series_info,
                 "category": get_category_name(main_cat),
                 "main_cat": main_cat,
@@ -4732,7 +4735,7 @@ def author_token_values(author):
 # Longest names first so "SeriesNumber" is never read as "Series" + "Number".
 RELATIVE_PATH_TOKEN_NAMES = (
     "FirstAuthorLastFirst", "AuthorLastFirst", "SeriesNumber", "FirstAuthor",
-    "Category", "Author", "Series", "Format", "Genre", "Title", "Year",
+    "Category", "Author", "Narrator", "Series", "Format", "Genre", "Title", "Year",
 )
 _REL_PATH_GROUP_RE = re.compile(r"\{([^{}]*)\}")
 _REL_PATH_TOKEN_NAME_RE = re.compile(
@@ -4746,7 +4749,8 @@ def build_relative_path_from_template(template, values):
 
     Values are expected to be pre-sanitized. A brace group may wrap literal text
     around a token name ("{ - Series}", "{ (Year)}"); the whole group renders only
-    when that token has a value. Tokens that resolve to an empty string collapse
+    when that token has a value. SeriesNumber supports :02 through :010 padding
+    of its integer part. Tokens that resolve to an empty string collapse
     away, so an unmatched {Series} does not leave an empty directory level behind.
     Mirrors buildRelativePathFromTemplate() in main.js.
     """
@@ -4761,7 +4765,16 @@ def build_relative_path_from_template(template, values):
         value = str(values.get(token) or "")
         if not value:
             return ""
-        return content[:token_match.start()] + value + content[token_match.end():]
+        suffix = content[token_match.end():]
+        # Optional zero-padding applies only to the integer part of series numbers.
+        # Bound the width so a mistyped template cannot allocate a huge filename.
+        padding = re.match(r":0(10|[1-9])(?![0-9])", suffix) if token == "{SeriesNumber}" else None
+        if padding:
+            suffix = suffix[padding.end():]
+            if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", value):
+                integer, dot, fraction = value.partition(".")
+                value = integer.zfill(int(padding.group(1))) + dot + fraction
+        return content[:token_match.start()] + value + suffix
 
     output = _REL_PATH_GROUP_RE.sub(render_group, text)
     segments = (segment.strip() for segment in output.split("/"))
@@ -4787,7 +4800,7 @@ def relative_path_tokens_from_metadata(torrent_meta):
     series_entries = list(raw_series.values())
     if series_entries and isinstance(series_entries[0], (list, tuple)) and series_entries[0]:
         first = series_entries[0]
-        series_name = str(first[0] or "").strip()
+        series_name = html.unescape(str(first[0] or "")).strip()
         series_number = normalize_series_number(first[1]) if len(first) > 1 else ""
 
     def clean(value):
@@ -4797,6 +4810,7 @@ def relative_path_tokens_from_metadata(torrent_meta):
     author_values = author_token_values(torrent_meta.get("author"))
     return {
         **{token: clean(value) for token, value in author_values.items()},
+        "{Narrator}": clean(parse_mam_metadata(torrent_meta.get("narrator", ""))),
         "{Series}": clean(series_name),
         "{SeriesNumber}": clean(series_number),
         "{Title}": clean(torrent_meta.get("title")),
@@ -5682,6 +5696,7 @@ async def mam_search():
                         "added_on": datetime.now().isoformat(),
                         "status": "unknown",
                         "retry_count": 0,
+                        "narrator": item.get("narrator_info", ""),
                         "series_info": item.get('series_display', ''),
                         "category": get_category_name(item.get('main_cat', '')),
                         "download_link": item.get('download_link', '')
@@ -6936,6 +6951,7 @@ async def watch_add_torrent(item: dict, *, category: str, use_wedge: bool) -> di
         'title': item.get('title') or "Unknown",
         'size': item.get('size') or '0 GiB',
         'main_cat': str(item.get('main_cat') or ''),
+        'narrator': parse_mam_metadata(item.get('narrator_info', '')),
         'series_info': item.get('series_info', ''),
         'catname': item.get('catname', '') or '',
         'filetype': item.get('filetype', '') or '',

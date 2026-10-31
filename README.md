@@ -318,7 +318,7 @@ For book enrichment only, the minimum required scope is `read:catalog:search`. L
 | `AUTO_ORGANIZE_ON_SCHEDULE` | No | Set to `true` to enable scheduled auto-organization. Defaults to `false`. |
 | `AUTO_ORGANIZE_INTERVAL_HOURS` | No | Number of hours between scheduled organization scans (only applies if `AUTO_ORGANIZE_ON_SCHEDULE` is `true`). Defaults to `1`. |
 | `AUTO_ORGANIZE_USE_COPY` | No | Set to `true` to copy files instead of hardlinking. Useful if download/organize paths are on different filesystems. Defaults to `false`. |
-| `DEFAULT_RELATIVE_PATH_TEMPLATE` | No | Default relative folder template used for organization paths. Supports `{Author}`, `{AuthorLastFirst}`, `{FirstAuthor}`, `{FirstAuthorLastFirst}`, `{Series}`, `{SeriesNumber}`, `{Title}`, `{Category}`, `{Genre}`, `{Format}`, and `{Year}` tokens, plus optional text such as `{ - Series}` (see [Path Customization](#path-customization)). Defaults to `{Author}/{Title}`. |
+| `DEFAULT_RELATIVE_PATH_TEMPLATE` | No | Default relative folder template used for organization paths. Supports `{Author}`, `{AuthorLastFirst}`, `{FirstAuthor}`, `{FirstAuthorLastFirst}`, `{Narrator}`, `{Series}`, `{SeriesNumber}`, `{Title}`, `{Category}`, `{Genre}`, `{Format}`, and `{Year}` tokens, plus optional text such as `{ - Series}` (see [Path Customization](#path-customization)). Defaults to `{Author}/{Title}`. |
 | `ORGANIZED_PATH` | If auto-organization is enabled | The default *container* path for your organized library (e.g., `/downloads/organized/`). Additional destination paths can be configured from the Settings UI and assigned to media types. |
 | `LOCAL_TORRENT_DOWNLOAD_PATH` | If auto-organization is enabled | The local path MouseSearch can access for completed torrent files (e.g., `/downloads/torrents/`). |
 | `REMOTE_TORRENT_DOWNLOAD_PATH` | No | Optional remote/client-side view of that same download directory. Recommended when your torrent client runs in a different filesystem namespace, such as Docker vs bare metal. |
@@ -468,8 +468,10 @@ MouseSearch supports configurable default organization templates via Settings ->
 | `{AuthorLastFirst}` | Every author as Last, First, joined with ` & ` | `Preston, Douglas & Child, Lincoln` |
 | `{FirstAuthor}` | Only the first listed author | `Frank Herbert` |
 | `{FirstAuthorLastFirst}` | Only the first listed author, as Last, First | `Herbert, Frank` |
-| `{Series}` | Series name (blank if the torrent has no series) | `Dune` |
+| `{Narrator}` | Narrator names, joined with commas (blank when unavailable) | `Stephen Fry` |
+| `{Series}` | Series name, with HTML entities decoded before filename sanitization (blank if the torrent has no series) | `Dune` |
 | `{SeriesNumber}` | Position within the series | `1` |
+| `{SeriesNumber:02}` | Series position with a minimum two-digit integer part (use `:03` for three digits; widths 1–10 supported) | `01`, `23`, `01.5` |
 | `{Title}` | Torrent title | `Dune` |
 | `{Category}` | Media type from the MAM category | `Audiobooks`, `Ebooks` |
 | `{Genre}` | MAM subcategory | `Science Fiction` |
@@ -477,6 +479,8 @@ MouseSearch supports configurable default organization templates via Settings ->
 | `{Year}` | Publication year from the torrent's Hardcover book match (blank when Hardcover enrichment is off or found no book) | `1965` |
 
   Tokens that have no value collapse out of the path rather than leaving an empty folder level, so `{Author}/{Series}/{Title}` yields `Frank Herbert/Dune` for a standalone book. To reproduce a `Audiobooks/Science Fiction/Frank Herbert/Dune` layout, use `{Category}/{Genre}/{Author}/{Title}`.
+
+  **Series-number padding:** `{SeriesNumber}` stays unpadded. Use `{SeriesNumber:02}` or an optional group like `{ #SeriesNumber:02}` to add leading zeros. Fractional positions keep their fraction (`1.5` → `01.5`), larger positions are never truncated, and absent numbers stay blank. Non-numeric positions are left unchanged. This changes new organization paths; existing folders are not renamed.
 
   **Optional text:** put fixed text inside the braces, next to the token name, to include it only when that token has a value. `{prefix Token suffix}` renders as `prefix + value + suffix`, or nothing at all when the token is empty. For example, `{Author}/{Title}{ - Series}{ #SeriesNumber}{ (Year)}` yields:
 
